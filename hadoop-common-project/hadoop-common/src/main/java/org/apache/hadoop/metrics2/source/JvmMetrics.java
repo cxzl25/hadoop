@@ -184,7 +184,7 @@ public class JvmMetrics implements MetricsSource {
       if (gcBean.getName() != null) {
         String name = gcBean.getName();
         // JDK-8265136 Skip concurrent phase
-        if ((name.startsWith("ZGC") && name.endsWith("Cycles"))) {
+        if (name.startsWith("ZGC") && name.endsWith("Cycles")) {
           continue;
         }
       }
