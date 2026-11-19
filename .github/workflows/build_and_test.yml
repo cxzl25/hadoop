@@ -29,9 +29,7 @@ name: "Build"
 # version of the workflow, so the contributor must sync their fork's trunk
 # first. See .github/pr-build-check.md.
 on:
-  push:
-    branches:
-      - "**"
+  # DEBUG BRANCH ONLY: disabled the push trigger to avoid running the full build.
   workflow_dispatch:
 
 jobs:

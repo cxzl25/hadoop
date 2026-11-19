@@ -1,0 +1,118 @@
+# TEMPORARY DEBUG WORKFLOW - not intended for upstream.
+# Loops TestDecommission / TestDecommissionWithBackoffMonitor
+# #testDeleteCorruptReplicaForUnderReplicatedBlock before (baseline) and after (fixed) the fix,
+# and runs both whole test classes the way the GHA "Build" workflow does.
+name: "DEBUG TestDecommission flaky"
+
+on:
+  push:
+    branches:
+      - "debug/testdecommission-flaky-ci"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # trunk commit the fix is based on; the baseline variant reverts the test file to it
+  BASE_SHA: b9e905ac8e71372e5b4d12b522cd83e2991b9f36
+  TEST_FILE: hadoop-hdfs-project/hadoop-hdfs/src/test/java/org/apache/hadoop/hdfs/TestDecommission.java
+  ITER: 10
+
+jobs:
+  loop:
+    name: loop ${{ matrix.variant }} ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ baseline, fixed ]
+        shard: [ 1, 2, 3, 4, 5 ]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+          cache: maven
+      - name: Revert the fix (baseline only)
+        if: matrix.variant == 'baseline'
+        run: git checkout "$BASE_SHA" -- "$TEST_FILE" && git status --short
+      - name: Build
+        run: ./mvnw -B -ntp install -DskipTests -pl :hadoop-hdfs -am
+      - name: Loop
+        shell: bash
+        run: |
+          mkdir -p loop-out
+          for i in $(seq 1 "$ITER"); do
+            for c in TestDecommission TestDecommissionWithBackoffMonitor; do
+              ./mvnw -B -ntp -pl :hadoop-hdfs test \
+                -Dtest="$c#testDeleteCorruptReplicaForUnderReplicatedBlock" \
+                -Dsurefire.rerunFailingTestsCount=0 -Dmaven.test.failure.ignore=true \
+                > loop-out/mvn.log 2>&1
+              x=hadoop-hdfs-project/hadoop-hdfs/target/surefire-reports/TEST-org.apache.hadoop.hdfs.$c.xml
+              if [ -f "$x" ] && grep -q 'tests="1"' "$x" && grep -q 'failures="0"' "$x" && grep -q 'errors="0"' "$x"; then
+                r=PASS
+              else
+                r=FAIL
+                cp hadoop-hdfs-project/hadoop-hdfs/target/surefire-reports/*"$c"-output.txt "loop-out/$c-run$i-output.txt" 2>/dev/null || true
+                cp loop-out/mvn.log "loop-out/$c-run$i-mvn.log"
+              fi
+              echo "${{ matrix.variant }} shard${{ matrix.shard }} run$i $c $r" | tee -a loop-out/results.txt
+            done
+          done
+          echo "## ${{ matrix.variant }} shard ${{ matrix.shard }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "PASS=$(grep -c ' PASS$' loop-out/results.txt) FAIL=$(grep -c ' FAIL$' loop-out/results.txt)" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: loop-${{ matrix.variant }}-${{ matrix.shard }}
+          path: loop-out/
+
+  classes:
+    # Whole test classes with the fix, using the same surefire settings as the GHA "Build" workflow
+    name: classes ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ 1, 2, 3, 4, 5 ]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v5
+        with:
+          distribution: zulu
+          java-version: 17
+          cache: maven
+      - name: Build
+        run: ./mvnw -B -ntp install -DskipTests -pl :hadoop-hdfs -am
+      - name: Test
+        run: >-
+          ./mvnw -B -ntp -pl :hadoop-hdfs test
+          -Dtest=TestDecommission,TestDecommissionWithBackoffMonitor
+          -Dmaven.test.failure.ignore=false -Dsurefire.rerunFailingTestsCount=2
+      - name: Summarize flaky/failed tests
+        if: always()
+        shell: bash
+        run: |
+          cd hadoop-hdfs-project/hadoop-hdfs/target/surefire-reports || exit 0
+          for x in TEST-*.xml; do
+            echo "### $x" >> "$GITHUB_STEP_SUMMARY"
+            grep -o 'tests="[0-9]*" errors="[0-9]*" skipped="[0-9]*" failures="[0-9]*"' "$x" | head -1 >> "$GITHUB_STEP_SUMMARY" || true
+            python3 - "$x" >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          for tc in ET.parse(sys.argv[1]).getroot().iter('testcase'):
+              tags = [c.tag for c in tc if c.tag in ('failure', 'error', 'flakyFailure', 'flakyError', 'rerunFailure', 'rerunError')]
+              if tags:
+                  print('- %s: %s' % (tc.get('name'), ','.join(tags)))
+          EOF
+          done
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: classes-${{ matrix.shard }}
+          path: hadoop-hdfs-project/hadoop-hdfs/target/surefire-reports/
