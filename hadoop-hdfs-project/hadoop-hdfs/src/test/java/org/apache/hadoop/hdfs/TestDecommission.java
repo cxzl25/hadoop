@@ -1939,6 +1939,12 @@ public class TestDecommission extends AdminStatesBaseTest {
     // sends under-replication blocks for replication frequently
     getConf().setLong(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY,
         DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_DEFAULT);
+    // If the Namenode sends a DNA_TRANSFER to a restarted datanode before that datanode has
+    // deleted its corrupt replica, the transfer fails with ReplicaAlreadyExistsException and
+    // the block stays in pendingReconstruction until this timeout expires. Use a short timeout
+    // so that the block is rescheduled for reconstruction soon after the corrupt replica is
+    // invalidated.
+    getConf().setInt(DFSConfigKeys.DFS_NAMENODE_RECONSTRUCTION_PENDING_TIMEOUT_SEC_KEY, 3);
     // Ensure that the DataStreamer client will replace the bad datanode on append failure
     getConf().set(HdfsClientConfigKeys.BlockWrite.ReplaceDatanodeOnFailure.POLICY_KEY, "ALWAYS");
     // Avoid having the DataStreamer client fail the append operation if datanode replacement fails
@@ -2106,23 +2112,16 @@ public class TestDecommission extends AdminStatesBaseTest {
       DataNodeTestUtils.triggerBlockReport(dnProps.getDatanode());
     }
 
-    // Validate the datanode is eventually decommissioned
-    // Some changes are needed to ensure replication/decommissioning occur in a timely manner:
-    // - if the namenode sends a DNA_TRANSFER before sending the DNA_INVALIDATE's then:
-    //   - the block will enter the pendingReconstruction queue
-    //   - this prevent the block from being sent for transfer again for some time
-    // - solution is to call "clearQueues" so that DNA_TRANSFER is sent again after DNA_INVALIDATE
-    // - need to run the check less frequently than DatanodeAdminMonitor
-    //       such that in between "clearQueues" calls 2 things can occur:
-    //   - DatanodeAdminMonitor runs which sets the block as neededReplication
-    //   - datanode heartbeat is received which sends the DNA_TRANSFER to the node
-    final int checkEveryMillis = datanodeAdminMonitorFixedRateSeconds * 2 * 1000;
+    // Validate the datanode is eventually decommissioned.
+    // Do not call BlockManager#clearQueues here: besides pendingReconstruction it also drops
+    // the pending DNA_INVALIDATE's. The Namenode removes a corrupt replica from the blocksMap
+    // as soon as it queues the invalidation, so a dropped invalidation is never resent (until
+    // the next full block report) and the restarted datanode keeps rejecting the DNA_TRANSFER
+    // with ReplicaAlreadyExistsException, which prevents decommissioning from completing.
     try {
-      GenericTestUtils.waitFor(() -> {
-        blockManager.clearQueues(); // Clear pendingReconstruction queue
-        return decomManager.getNumTrackedNodes() == 0 && decomManager.getNumPendingNodes() == 0
-            && decommNode.getAdminState().equals(AdminStates.DECOMMISSIONED);
-      }, checkEveryMillis, 40000);
+      GenericTestUtils.waitFor(() -> decomManager.getNumTrackedNodes() == 0
+          && decomManager.getNumPendingNodes() == 0
+          && decommNode.getAdminState().equals(AdminStates.DECOMMISSIONED), 500, 60000);
     } catch (Exception e) {
       blocksInFile = fs.getFileBlockLocations(file, 0, 0);
       assertEquals(1, blocksInFile.length);
