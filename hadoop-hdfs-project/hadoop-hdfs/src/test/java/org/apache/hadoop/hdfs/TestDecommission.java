@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 import java.util.EnumSet;
@@ -1984,6 +1985,8 @@ public class TestDecommission extends AdminStatesBaseTest {
       out.write(i);
     }
     out.close();
+    // close() only waits for the minimum number of replicas to be reported to the Namenode
+    DFSTestUtil.waitReplication(fs, file, replicationFactor);
 
     // Validate the block exists with expected number of replicas
     assertEquals(1, blockManager.getTotalBlocks());
@@ -2151,7 +2154,8 @@ public class TestDecommission extends AdminStatesBaseTest {
         firstStoppedNode.getXferAddr(), secondStoppedNode.getXferAddr(), decommNode.getXferAddr());
   }
 
-  void appendBlock(final FileSystem fs, final Path file, int expectedReplicas) throws IOException {
+  void appendBlock(final FileSystem fs, final Path file, int expectedReplicas)
+      throws IOException, InterruptedException {
     LOG.info("Appending to the block pipeline");
     boolean failed = false;
     Exception failedReason = null;
@@ -2165,6 +2169,15 @@ public class TestDecommission extends AdminStatesBaseTest {
       failed = true;
       failedReason = e;
     } finally {
+      if (!failed) {
+        // close() only waits for the minimum number of replicas to be reported to the
+        // Namenode; wait for the other datanodes in the pipeline to report the block too.
+        try {
+          DFSTestUtil.waitReplication(fs, file, (short) expectedReplicas);
+        } catch (TimeoutException e) {
+          // The number of replicas is validated below
+        }
+      }
       BlockLocation[] blocksInFile = fs.getFileBlockLocations(file, 0, 0);
       assertEquals(1, blocksInFile.length);
       List<String> replicasInBlock = Arrays.asList(blocksInFile[0].getNames());
