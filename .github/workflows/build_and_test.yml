@@ -31,7 +31,7 @@ name: "Build"
 on:
   push:
     branches:
-      - "**"
+      - "debug/testdecommission-gha-slow"
   workflow_dispatch:
 
 jobs:
@@ -41,22 +41,3 @@ jobs:
     name: Run
     uses: ./.github/workflows/tmpl_build_and_test.yml
 
-  rockylinux-8-java21-build-only:
-    permissions:
-      packages: write
-    name: Run
-    uses: ./.github/workflows/tmpl_build_and_test.yml
-    with:
-      java: 21
-      os: rockylinux_8
-      jobs: '[ "build-only" ]'
-
-  debian-13-java25-build-only:
-    permissions:
-      packages: write
-    name: Run
-    uses: ./.github/workflows/tmpl_build_and_test.yml
-    with:
-      java: 25
-      os: debian_13
-      jobs: '[ "build-only" ]'
